@@ -58,6 +58,43 @@ class PJCBackgroundWorker(QThread):
             api_service.log_to_file(traceback.format_exc())
 
 
+class StatusBackgroundWorker(QThread):
+    """Background worker to fetch current statuses via API for all visible jobs."""
+    statuses_ready = pyqtSignal(dict) # { "PJC": "translated_status" }
+
+    def __init__(self, pjc_list, sql_config):
+        super().__init__()
+        self.pjc_list = [str(p).strip() for p in pjc_list if p and str(p).strip() != "NEW"]
+        self.sql_config = sql_config
+
+    def run(self):
+        if not self.pjc_list:
+            return
+            
+        try:
+            from floor_view.api import api_service
+            # The user explicitly wants ONLY the API GET request
+            api_service.log_to_file(f"STATUS WORKER: Polling API for {len(self.pjc_list)} jobs...")
+            
+            # Fetch statuses in bulk via API
+            raw_results = api_service.get_live_job_statuses(self.pjc_list, self.sql_config)
+            
+            # Extract just the status string from the API result Dict
+            clean_results = {}
+            for pjc, data in raw_results.items():
+                if isinstance(data, dict):
+                    clean_results[pjc] = data.get("status", "not_started")
+                else:
+                    clean_results[pjc] = str(data)
+            
+            if clean_results:
+                self.statuses_ready.emit(clean_results)
+                
+        except Exception as e:
+            from floor_view.api import api_service
+            api_service.log_to_file(f"STATUS WORKER ERROR: {e}")
+
+
 
 class PlanningTable(QTableWidget):
     """
@@ -765,7 +802,11 @@ class PlanningBoard(QWidget):
         self.delta_sync_in_progress = False # Flag to prevent multiple delta syncs
         self.delta_worker = None # Reference to the current delta sync worker
         
-        # Background Sync logic removed (Write-only mode)
+        # --- Live Status Polling ---
+        self.status_sync_timer = QTimer()
+        self.status_sync_timer.timeout.connect(self._poll_live_statuses)
+        self._is_status_syncing = False
+        self._status_worker = None
         
         
 
@@ -785,6 +826,9 @@ class PlanningBoard(QWidget):
         
         # Startup Optimization: Recalculate schedule based on current settings
         QTimer.singleShot(500, self.run_optimizer)
+        
+        # Start API Status Polling
+        QTimer.singleShot(2000, self.refresh_sync_timers)
 
     def get_display_columns(self, machine_data):
         """Returns the list of columns to actually display based on category."""
@@ -1338,8 +1382,79 @@ class PlanningBoard(QWidget):
 
 
     def refresh_sync_timers(self):
-        """Re-configures and restarts sync timers (Disabled for write-only mode)."""
-        pass
+        """Re-configures and restarts the API status polling timer."""
+        self.status_sync_timer.stop()
+        
+        # 1. Determine sync source and interval
+        sync_src = self.settings.get("syncSource") or self.settings.get("sync_source", "sql")
+        # User explicitly asked for API only for live status updates in this turn
+        api_enabled = (sync_src == "api") or self.settings.get("apiEnabled", False)
+        
+        if api_enabled:
+            # Get interval in seconds (default 30s)
+            interval_secs = self.settings.get("apiInterval") or self.settings.get("api_interval") or 30
+            try:
+                interval_ms = int(interval_secs) * 1000
+            except:
+                interval_ms = 30000
+                
+            print(f"DEBUG: Starting Live API Status Sync (Interval: {interval_secs}s)")
+            self.status_sync_timer.start(interval_ms)
+        else:
+            print("DEBUG: Live API Status Sync disabled (API not used as sync source).")
+
+    def _poll_live_statuses(self):
+        """Identifies active PJCs and triggers the background API check."""
+        if self._is_status_syncing: return
+        
+        # 1. Get all PJCs currently visible in the active machine
+        visible_jobs = self.get_visible_jobs()
+        pjcs = [str(j.get("pjc")).strip() for j in visible_jobs if j.get("pjc") and j.get("pjc") != "NEW"]
+        
+        if not pjcs:
+            return
+            
+        self._is_status_syncing = True
+        sql_config = self.get_sql_config()
+        
+        self._status_worker = StatusBackgroundWorker(pjcs, sql_config)
+        self._status_worker.statuses_ready.connect(self.apply_status_updates)
+        self._status_worker.finished.connect(self._on_status_worker_finished)
+        self._status_worker.start()
+
+    def _on_status_worker_finished(self):
+        self._is_status_syncing = False
+        self._status_worker = None
+
+    def apply_status_updates(self, status_map):
+        """Updates internal job objects with translated statuses from the API."""
+        if not status_map: return
+        
+        updated = False
+        # Search across ALL machines to ensure consistency
+        for machine_name, machine_data in self.all_machines_data.items():
+            for job in machine_data.get("jobs", []):
+                pjc = str(job.get("pjc", "")).strip()
+                if pjc in status_map:
+                    new_status = status_map[pjc]
+                    old_status = job.get("status")
+                    
+                    if new_status and new_status != old_status:
+                        api_service.log_to_file(f"LIVE STATUS UPDATE: Job {pjc} | {old_status} -> {new_status}")
+                        job["status"] = new_status
+                        updated = True
+                        
+                        # Handle specific side effects (e.g. duplicating to next machine if completed)
+                        if new_status == "completed" and old_status != "completed":
+                            # Logic for auto-advancing workflows could be placed here if desired
+                            pass
+
+        if updated:
+            self.refresh_table()
+            self.save_data() # Persist the new status to local JSON
+            # Note: We don't necessarily push a full SQL sync back here to avoid feedback loops,
+            # but usually the granular save handled status changes if they happened in-app.
+            # However, since this is an EXTERNAL update, we just want to reflect it locally.
 
 
 

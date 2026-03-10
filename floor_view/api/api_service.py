@@ -89,9 +89,10 @@ def translate_api_status(api_val: str) -> str:
 
     val = str(api_val).strip().lower()
 
-    if any(k in val for k in ["complete", "done", "finished", "washup", "wash up", "wash-up"]):
+    # Explicit mappings from user
+    if any(k in val for k in ["wash up", "washup", "wash-up", "complete", "done", "finished"]):
         return "completed"
-    if any(k in val for k in ["make ready", "preparing", "setup", "run", "process", "printing", "finishing", "active"]):
+    if any(k in val for k in ["make ready", "makeready", "run", "preparing", "setup", "process", "printing", "active"]):
         return "in_progress"
     if any(k in val for k in ["hold", "paused"]):
         return "on_hold"
