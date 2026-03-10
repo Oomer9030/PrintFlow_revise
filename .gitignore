@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+ENV/
+.env
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Local configuration
+*.json
+!README.md
+!floor_view/**/*.json
+!py_planner/**/*.json
+
+# System / IDE
+.vscode/
+.idea/
+.gemini/
+.antigravity/
+
+# Data
+*.db
+*.sqlite
+logs/
