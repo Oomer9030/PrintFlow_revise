@@ -4,6 +4,11 @@ import os
 import copy
 from datetime import datetime, timedelta
 
+def get_safe_table_name(config: Dict, default: str = "Production_Planner_Export") -> str:
+    """Helper to get a bracketed table name from config, falling back to default."""
+    raw = config.get("table") or default
+    return f"[{raw}]" if not str(raw).startswith("[") else str(raw)
+
 def find_best_driver() :
     """Detects available ODBC drivers and picks the best modern one."""
     drivers = pyodbc.drivers()
@@ -39,7 +44,7 @@ SQL_CONFIG = {
     "driver": "{ODBC Driver 18 for SQL Server}",
     "user": "awol_reporting",
     "password": "awol@12345",
-    "table": "awol_planning_board_v2" # Default table from app context
+    "table": "Production_Planner_Export" # Default table from app context
 }
 
 COLUMN_MAPPING = {
@@ -135,7 +140,6 @@ def get_connection(config: Dict, timeout: int = 5):
         t.join(timeout + 2) # Give it 2 extra seconds for overhead
         
         if t.is_alive():
-            print(f"SQL Service: Connection TIEMOUT (Threaded) after {timeout+2}s", flush=True)
             return None
             
         if error[0]:
@@ -202,7 +206,6 @@ def get_bulk_job_data(job_numbers: List[str], config: Optional[Dict] = None) -> 
 
     try:
         if not config or not config.get("server"):
-            print("SQL Service: No configuration provided or server missing. Skipping fetch.")
             return []
 
         conn = get_connection(config)
@@ -246,7 +249,6 @@ def get_bulk_job_data(job_numbers: List[str], config: Optional[Dict] = None) -> 
         # Robust query handling whitespace and type differences
         query = f"SELECT * FROM {safe_table} WHERE LTRIM(RTRIM(CAST({id_col} AS VARCHAR))) IN ({placeholders})"
         
-        print(f"DEBUG SQL: Fetching PJCs: {clean_job_numbers}")
         cursor.execute(query, clean_job_numbers)
         
         columns = [column[0] for column in cursor.description]
@@ -313,7 +315,6 @@ def get_bulk_job_data(job_numbers: List[str], config: Optional[Dict] = None) -> 
         return results
         
     except Exception as e:
-        print(f"SQL Error: {e}")
         return []
 
 def translate_sql_status(sql_val: str) -> str:
@@ -387,7 +388,6 @@ def get_live_job_statuses(job_numbers: List[str], config: Dict) -> Dict[str, str
                     break
             if found: break
             
-        print(f"SQL Service: Status View ID column: '{id_col}'")
         
         # Identify Status Column
         status_col = "LastWorkOperation" # Default
@@ -421,7 +421,7 @@ def get_live_job_statuses(job_numbers: List[str], config: Dict) -> Dict[str, str
         except Exception as e:
             # Fallback for tables without the assumed DateTime column or Window Function support
             if "DateTime" not in str(e):
-                print(f"SQL Service: Specialized query failed ({e}), falling back to simple SELECT.")
+                pass
             # Fetch * to allow fuzzy status detection in fallback too
             query = f"SELECT {id_col}, * FROM {safe_table} WHERE LTRIM(RTRIM(CAST({id_col} AS VARCHAR))) IN ({placeholders})"
             cursor.execute(query, clean_pjcs)
@@ -452,7 +452,6 @@ def get_live_job_statuses(job_numbers: List[str], config: Dict) -> Dict[str, str
         conn.close()
         return status_map
     except Exception as e:
-        print(f"SQL Live Status Error: {e}")
         return {}
 
 def translate_sql_status(api_val: str) -> str:
@@ -497,7 +496,7 @@ def ensure_app_state_table_exists(config: Dict):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"SQL State Schema Error: {e}")
+        pass
 
 def load_full_plan_from_sql(config: Dict) -> Optional[Dict]:
     """Retrieves the entire application state (machines + jobs) from SQL."""
@@ -535,7 +534,7 @@ def load_full_plan_from_sql(config: Dict) -> Optional[Dict]:
         # 2. Load Jobs for each machine
         full_data = {"appSettings": settings, "machines": {}}
         
-        export_table = "Production_Planner_Export"
+        export_table = get_safe_table_name(config)
         cursor.execute(f"SELECT * FROM {export_table} ORDER BY Priority ASC, LastUpdated ASC")
         columns = [column[0] for column in cursor.description]
         job_rows = cursor.fetchall()
@@ -598,7 +597,6 @@ def load_full_plan_from_sql(config: Dict) -> Optional[Dict]:
         conn.close()
         return full_data
     except Exception as e:
-        print(f"SQL Load Plan Error: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -649,7 +647,7 @@ def save_full_state_to_sql(data: Dict, config: Dict):
         # After any state change, update the global change timestamp
         update_global_change_timestamp(config)
     except Exception as e:
-        print(f"SQL Save State Error: {e}")
+        pass
 
 def update_global_change_timestamp(config: Dict):
     """Updates the global change timestamp to signal all instances to reload."""
@@ -672,7 +670,7 @@ def update_global_change_timestamp(config: Dict):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"SQL Update Signal Error: {e}")
+        pass
 
 def get_last_global_change(config: Dict) -> Optional[str]:
     """Returns the ISO timestamp of the last global change signal."""
@@ -702,7 +700,7 @@ def ensure_export_table_exists(config: Dict):
         if not conn: return
         cursor = conn.cursor()
         
-        table_name = "Production_Planner_Export"
+        table_name = get_safe_table_name(config)
         
         # Check if we need to migrate from PJC as PK TO RowID as PK
         # If RowID column doesn't exist, we drop and recreate (simplest for a mirror table)
@@ -757,9 +755,6 @@ def ensure_export_table_exists(config: Dict):
         cursor.execute(f"IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('{table_name}') AND name = 'ProdDeliveryDate') "
                        f"ALTER TABLE {table_name} ADD ProdDeliveryDate DATETIME")
         
-        # Migration: Add DeletedAt column if it doesn't exist
-        cursor.execute(f"IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('{table_name}') AND name = 'DeletedAt') "
-                       f"ALTER TABLE {table_name} ADD DeletedAt DATETIME")
                        
         # Migration: Add Priority column if it doesn't exist
         cursor.execute(f"IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('{table_name}') AND name = 'Priority') "
@@ -784,7 +779,7 @@ def ensure_export_table_exists(config: Dict):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"SQL Schema Error: {e}")
+        pass
 
 def ensure_users_table_exists(config: Dict, timeout: int = 5):
     """
@@ -826,12 +821,11 @@ def ensure_users_table_exists(config: Dict, timeout: int = 5):
             planner_tabs = "planner,dashboard,records,efficiency,financial,strategic,about"
             cursor.execute(f"INSERT INTO {table_name} (Username, Password, Role, Permissions) VALUES (?, ?, ?, ?)", 
                          ("Planner", "pass", "Planner", planner_tabs))
-            print("SQL Service: Initialized default user accounts (Admin/Planner).")
                          
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"SQL User Schema Error: {e}")
+        pass
 
 def get_sql_users(config: Dict, timeout: int = 5) -> List[Dict]:
     """Fetches all users from SQL."""
@@ -882,7 +876,7 @@ def save_sql_user(user_data: Dict, config: Dict):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"SQL Save User Error: {e}")
+        pass
 
 def delete_sql_user(username: str, config: Dict):
     """Deletes a user from SQL."""
@@ -895,28 +889,32 @@ def delete_sql_user(username: str, config: Dict):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"SQL Delete User Error: {e}")
+        pass
 
 def delete_job_from_sql(job_id: str, config: Dict):
-    """Deletes a single job row from Production_Planner_Export by RowID."""
+    """Deletes a single job row from SQL by RowID."""
     try:
         if not config or not config.get("server"):
             return
         if not job_id:
             return
+        table_name = get_safe_table_name(config)
         conn = get_connection(config)
         if not conn:
             return
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM Production_Planner_Export WHERE RowID = ?",
+            f"DELETE FROM {table_name} WHERE RowID = ?",
             (str(job_id),)
         )
         conn.commit()
         conn.close()
-        print(f"SQL: Deleted job RowID={job_id} from Production_Planner_Export")
+        
+        # Signal global change so other instances reload
+        update_global_change_timestamp(config)
     except Exception as e:
-        print(f"SQL Delete Job Error (RowID={job_id}): {e}")
+        from . import api_service
+        api_service.log_to_file(f"SQL Delete Error for job {job_id}: {e}")
 
 def update_sql_user_login(username: str, config: Dict):
     """Updates the LastLogin timestamp for a user in SQL."""
@@ -928,9 +926,8 @@ def update_sql_user_login(username: str, config: Dict):
         cursor.execute("UPDATE Production_Planner_Users SET LastLogin = GETDATE() WHERE Username = ?", (username,))
         conn.commit()
         conn.close()
-        print(f"SQL Service: Updated LastLogin for {username}")
     except Exception as e:
-        print(f"SQL Update Login Error: {e}")
+        pass
 
 def sync_planner_to_sql(all_machines_data: Dict, config: Dict):
     """
@@ -946,7 +943,7 @@ def sync_planner_to_sql(all_machines_data: Dict, config: Dict):
         if not conn: return
         cursor = conn.cursor()
         
-        table_name = "Production_Planner_Export"
+        table_name = get_safe_table_name(config)
         
         for m_name, mc in all_machines_data.items():
             jobs = mc.get("jobs", [])
@@ -1044,7 +1041,11 @@ def sync_planner_to_sql(all_machines_data: Dict, config: Dict):
                 try:
                     cursor.execute(merge_query, params)
                 except Exception as e:
-                    print(f"SQL Sync Execute Error for {pjc}: {e}")
+                    import traceback
+                    from . import api_service
+                    api_service.log_to_file(f"SQL SYNC ERROR for Job {pjc} on {m_name}: {e}")
+                    # Optional: detailed trace if needed
+                    # api_service.log_to_file(traceback.format_exc())
         
         conn.commit()
         
@@ -1056,27 +1057,14 @@ def sync_planner_to_sql(all_machines_data: Dict, config: Dict):
                 jid = str(job.get("id", ""))
                 if jid: active_ids.append(jid)
         
-        if active_ids:
-            print(f"SQL Sync: Marking {len(active_ids)} active RowIDs. Marking others as deleted...")
-            placeholders = ", ".join(["?" for _ in active_ids])
-            # Soft delete any RowID NOT in the current planner dataset
-            del_query = f"UPDATE {table_name} SET DeletedAt = GETDATE(), LastUpdated = GETDATE(), ModifiedBy = 'System' WHERE RowID NOT IN ({placeholders}) AND DeletedAt IS NULL"
-            cursor.execute(del_query, active_ids)
-        else:
-            print(f"SQL Sync: No active RowIDs found. Soft-wiping {table_name}!")
-            del_query = f"UPDATE {table_name} SET DeletedAt = GETDATE(), LastUpdated = GETDATE(), ModifiedBy = 'System' WHERE DeletedAt IS NULL"
-            cursor.execute(del_query)
-        
         conn.commit()
         # Signal a global change after syncing jobs
         update_global_change_timestamp(config)
 
         cursor.close()
         conn.close()
-        print(f"SQL Sync: Successfully updated {table_name} and performed cleanup.")
         
     except Exception as e:
-        print(f"SQL Sync Error: {e}")
         import traceback
         traceback.print_exc()
 
@@ -1087,20 +1075,17 @@ def save_single_job_to_sql(job: Dict, machine_name: str, config: Dict, user_name
     """
     try:
         if not config:
-            print("SQL LIVE SYNC: Skipping - No SQL config provided.")
             return
         if not config.get("server") and not config.get("sqlServer"):
-            print("SQL LIVE SYNC: Skipping - No SQL server address in config.")
             return
             
         conn = get_connection(config)
         if not conn:
             from .sql_service import _LAST_ERROR_MSG
-            print(f"SQL LIVE SYNC: Connection failed for PJC {job.get('pjc')}. Error: {_LAST_ERROR_MSG}")
             return
         cursor = conn.cursor()
         
-        table_name = "Production_Planner_Export"
+        table_name = get_safe_table_name(config)
         job_id = str(job.get("id", ""))
         pjc = str(job.get("pjc", "")).strip()
         # Section: Executive Notes
@@ -1114,24 +1099,36 @@ def save_single_job_to_sql(job: Dict, machine_name: str, config: Dict, user_name
         
         # Helper logic handled by top-level parse_sql_datetime
 
+        def _sn(val, is_num=False):
+            "Returns None if val is empty/null, else returns sanitized string or float"
+            if val is None or str(val).strip().lower() in ["", "none", "nan", "null"]: return None
+            s = str(val).strip()
+            if is_num:
+                try:
+                    # Keep only digits, decimal point, and minus sign
+                    clean = "".join([c for c in s if c.isdigit() or c in ".-"])
+                    return float(clean) if clean else None
+                except: return None
+            return s
+
         v = {
             "id": job_id, "pjc": pjc, "machine": machine_name,
-            "customer": job.get("customer"), "desc": job.get("description"),
+            "customer": _sn(job.get("customer")), "desc": _sn(job.get("description")),
             "deliv": parse_sql_datetime(job.get("deliveryDate")), "order": parse_sql_datetime(job.get("pjcIn")),
-            "qty": str(job.get("qty", "")), "gear": str(job.get("gearTeeth", "")),
-            "meters": job.get("meters"), "mctime": job.get("mcTime"),
-            "width": str(job.get("width", "")), "o_status": job.get("orderStatus"),
-            "colors": str(job.get("colValue", "")), "cv": job.get("colorsVarnish"),
+            "qty": _sn(job.get("qty")), "gear": _sn(job.get("gearTeeth")),
+            "meters": _sn(job.get("meters"), is_num=True), "mctime": _sn(job.get("mcTime"), is_num=True),
+            "width": _sn(job.get("width")), "o_status": _sn(job.get("orderStatus")),
+            "colors": _sn(job.get("colValue")), "cv": _sn(job.get("colorsVarnish")),
             "ink_ready": 1 if job.get("inkReady") else 0,
-            "plate": job.get("plateId"), "plate_ready": 1 if job.get("plateReady") else 0,
-            "amt": job.get("totalAmt"),
-            "status": job.get("status"), "prog": job.get("progress"),
+            "plate": _sn(job.get("plateId")), "plate_ready": 1 if job.get("plateReady") else 0,
+            "amt": _sn(job.get("totalAmt"), is_num=True),
+            "status": _sn(job.get("status")), "prog": _sn(job.get("progress")),
             "start": parse_sql_datetime(job.get("startedAt")), "comp": parse_sql_datetime(job.get("completedAt")),
-            "notes": job.get("notes"), "sched": sched_str, "color": job.get("rowColor"),
-            "dieCut": job.get("dieCut"), "user": user_name,
+            "notes": _sn(job.get("notes")), "sched": _sn(sched_str), "color": _sn(job.get("rowColor")),
+            "dieCut": _sn(job.get("dieCut")), "user": _sn(user_name),
             "pdd": parse_sql_datetime(job.get("prodDeliveryDate")),
-            "finishing_mc": job.get("finishingMachine"),
-            "packing_mc": job.get("packingMachine")
+            "finishing_mc": _sn(job.get("finishingMachine")),
+            "packing_mc": _sn(job.get("packingMachine"))
         }
 
         merge_query = f"""
@@ -1180,11 +1177,11 @@ def save_single_job_to_sql(job: Dict, machine_name: str, config: Dict, user_name
         conn.close()
         # Signal a global change after saving a single job
         update_global_change_timestamp(config)
-        print(f"SQL LIVE SYNC: Pushed granular update for PJC {pjc} (Row: {job_id})")
     except Exception as e:
-        print(f"SQL Granular Sync Error: {e}")
         import traceback
-        traceback.print_exc()
+        from . import api_service
+        api_service.log_to_file(f"SQL Save Job Error for {job.get('pjc')}: {e}")
+        # api_service.log_to_file(traceback.format_exc())
 
 def fetch_delta_updates(last_sync: datetime, exclude_user: str, config: Dict) -> List[Dict]:
     """
@@ -1199,7 +1196,8 @@ def fetch_delta_updates(last_sync: datetime, exclude_user: str, config: Dict) ->
         # Safety Margin: Subtract 1 minute to account for clock drift between PC and SQL Server
         sync_threshold = last_sync - timedelta(minutes=1)
         
-        query = "SELECT * FROM Production_Planner_Export WHERE LastUpdated > ? AND (ModifiedBy != ? OR ModifiedBy IS NULL)"
+        table_name = get_safe_table_name(config)
+        query = f"SELECT * FROM {table_name} WHERE LastUpdated > ? AND (ModifiedBy != ? OR ModifiedBy IS NULL)"
         cursor.execute(query, (sync_threshold, exclude_user))
         
         columns = [column[0] for column in cursor.description]
@@ -1237,7 +1235,6 @@ def fetch_delta_updates(last_sync: datetime, exclude_user: str, config: Dict) ->
         conn.close()
         return results
     except Exception as e:
-        print(f"SQL Delta Fetch Error: {e}")
         return []
 
 def fetch_state_updates(last_sync_time: datetime, config: Dict) -> Dict:
@@ -1256,7 +1253,7 @@ def fetch_state_updates(last_sync_time: datetime, config: Dict) -> Dict:
         rows = cursor.fetchall()
         
         if rows:
-            print(f"SQL SYNC: Found {len(rows)} potential state updates in Production_Planner_State.")
+            pass
         
         import json
         updates = {}
@@ -1269,7 +1266,6 @@ def fetch_state_updates(last_sync_time: datetime, config: Dict) -> Dict:
         conn.close()
         return updates
     except Exception as e:
-        print(f"SQL Fetch State Delta Error: {e}")
         return {}
 
 def test_connection(config: Dict) -> tuple[bool, str]:

@@ -56,9 +56,8 @@ def run_production_planner():
             if os.path.exists(candidate):
                 try:
                     shutil.copy2(candidate, data_file)
-                    print(f"BOOTSTRAP: Copied default data file from {candidate} to {data_file}")
                 except Exception as copy_err:
-                    print(f"BOOTSTRAP WARNING: Could not copy bundled data file: {copy_err}")
+                    pass
                 break
     
     data = load_planner_data(data_file)
@@ -75,8 +74,7 @@ def run_production_planner():
         start_api_server(lambda: data_container["current"], port=api_port)
         print(f"API SERVER: Started on port {api_port} (Pre-Login Active)")
     except Exception as e:
-        print(f"FAILED TO START API SERVER EARLY: {e}")
-    
+        pass
     # CLEANUP: Robustly extract SQL config (handle both nested and flat fields)
     s = initial_settings
     sql_config = s.get("sqlConfig", {})
@@ -97,7 +95,6 @@ def run_production_planner():
         sql_config["driver"] = s.get("sqlDriver", "{ODBC Driver 17 for SQL Server}")
 
     if sql_config.get("database") == "API_MODE":
-        print("CLEANUP: Removing Floor View API settings from Main App SQL config...")
         data["appSettings"]["sqlConfig"] = {}
         data["appSettings"]["sqlServer"] = None
         sql_config = {}
@@ -110,10 +107,18 @@ def run_production_planner():
         sql_config = {}
     
     # 2. Check for First-Run SQL Config
-    # Inject hardcoded config if missing in local JSON
+    # Inject hardcoded defaults if missing or empty in local JSON
     from floor_view.api.sql_service import SQL_CONFIG
-    if not sql_config.get("server") and SQL_CONFIG.get("server"):
-        print("BOOTSTRAP: Injecting hardcoded SQL configuration...")
+    if sql_config.get("server"):
+        # Ensure we have a table name
+        if not sql_config.get("table") or sql_config.get("table") == "YourViewName":
+            sql_config["table"] = s.get("sqlTableView") or SQL_CONFIG.get("table", "Production_Planner_Export")
+            
+        # Ensure we have a driver
+        if not sql_config.get("driver"):
+             sql_config["driver"] = s.get("sqlDriver") or SQL_CONFIG.get("driver", "{ODBC Driver 17 for SQL Server}")
+    
+    elif SQL_CONFIG.get("server"):
         if "sqlConfig" not in data["appSettings"]: 
             data["appSettings"]["sqlConfig"] = {}
         data["appSettings"]["sqlConfig"].update(SQL_CONFIG)
@@ -121,7 +126,6 @@ def run_production_planner():
 
     # If STILL no server AND not explicitly marked offline, show wizard (should be skipped now)
     if not sql_config.get("server") and not sql_config.get("offline"):
-        print("SQL NOT CONFIGURED. LAUNCHING SETUP WIZARD...")
         wizard = SQLConfigWizard(data_file, data, is_floor_view=False)
         if wizard.exec():
             # Reload data after wizard save
@@ -132,26 +136,22 @@ def run_production_planner():
             print("SETUP CANCELLED. EXITING.")
             sys.exit(0)
     
-    print(f"TRACE: Entering user fetch loop...", flush=True)
     while True:
         # 3. Fetch Users (Prioritize SQL, with fast fail) inside loop for real-time updates
         users = []
         sql_config = data.get("appSettings", {}).get("sqlConfig", {})
         if sql_config.get("server"):
-            print(f"CONNECTING TO SQL: {sql_config.get('server')}...")
             try:
                 from floor_view.api import sql_service
                 users = sql_service.get_sql_users(sql_config, timeout=2)
                 if users:
-                    print(f"SQL SYNC: Retrieved {len(users)} users: {[u['name'] for u in users]}")
                     # Inject SQL users into the data object so UI sees them
                     if "appSettings" not in data: data["appSettings"] = {}
                     data["appSettings"]["users"] = users
                 else:
-                    print("SQL SYNC: No users retrieved from SQL database.")
+                    pass
             except Exception as e:
-                print(f"SQL SYNC WARNING: Could not fetch users ({e}). Falling back to local.")
-
+                pass
         if not users:
             users = data.get("appSettings", {}).get("users", [])
             if not users:
@@ -178,7 +178,6 @@ def run_production_planner():
             # Preserve in local data as fallback
             if "appSettings" not in data: data["appSettings"] = {}
             data["appSettings"]["users"] = users
-            print("BOOTSTRAP: Injected 'Pre-Press Dep.' role into user list.")
 
         # 4. Show Login
         # 3. Show Login First
@@ -219,5 +218,4 @@ def run_production_planner():
             break
 
 if __name__ == "__main__":
-    print("BOOTSTRAP: Starting Production Planner...", flush=True)
     run_production_planner()

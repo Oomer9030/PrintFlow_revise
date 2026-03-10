@@ -1,10 +1,134 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, 
-                             QHeaderView, QLabel, QHBoxLayout, QLineEdit, QFrame, QComboBox)
-from PyQt6.QtCore import Qt
+                             QHeaderView, QLabel, QHBoxLayout, QLineEdit, QFrame, QComboBox, QDateEdit)
+from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor, QFont
 from datetime import datetime
-from py_planner.components.filter_header import FilterHeader
 from py_planner.utils.planner_utils import PlannerLogic
+
+class FilterHeader(QFrame):
+    def __init__(self, data, on_filter_changed):
+        super().__init__()
+        # Store full data object to allow dynamic access to latest machines
+        self.data = data
+        self.on_filter_changed = on_filter_changed
+        self.setStyleSheet("background-color: #181c33; border-bottom: 1px solid #232a4e;")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(30, 15, 30, 15)
+        layout.setSpacing(25)
+
+        # Category Selector
+        c_box = QVBoxLayout()
+        cl = QLabel("CATEGORY")
+        cl.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 900;")
+        self.cat_selector = QComboBox()
+        self.cat_selector.addItem("All Categories", "all")
+        self.cat_selector.addItem("Planner (Production)", "production")
+        self.cat_selector.addItem("Finishing", "finishing")
+        self.cat_selector.addItem("Packing", "packing")
+        self.cat_selector.addItem("Delivery", "delivery")
+        self.cat_selector.setStyleSheet("background: #111122; border: 1px solid #232a4e; color: white; padding: 5px; min-width: 150px;")
+        
+        c_box.addWidget(cl)
+        c_box.addWidget(self.cat_selector)
+        layout.addLayout(c_box)
+
+        # Machine selector
+        m_box = QVBoxLayout()
+        ml = QLabel("MACHINE FOCUS")
+        ml.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 900;")
+        self.mc_selector = QComboBox()
+        self.mc_selector.addItem("All Fleet Units", "all")
+        self.mc_selector.setStyleSheet("background: #111122; border: 1px solid #232a4e; color: white; padding: 5px; min-width: 150px;")
+        
+        m_box.addWidget(ml)
+        m_box.addWidget(self.mc_selector)
+        layout.addLayout(m_box)
+
+        # Initial machine population
+        self.refresh_machines()
+
+        self.cat_selector.currentIndexChanged.connect(self.on_category_changed)
+        self.mc_selector.currentIndexChanged.connect(self.trigger_change)
+
+        # Dates: wider default range to ensure all metrics are captured
+        today = QDate.currentDate()
+        self.end_date = today.addDays(365)
+        self.start_date = today.addDays(-365)
+
+        s_box = QVBoxLayout()
+        sl = QLabel("START DATE")
+        sl.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 900;")
+        self.s_edit = QDateEdit(self.start_date)
+        self.s_edit.setCalendarPopup(True)
+        self.s_edit.setStyleSheet("background: #111122; border: 1px solid #232a4e; color: white; padding: 5px;")
+        self.s_edit.dateChanged.connect(self.trigger_change)
+        s_box.addWidget(sl)
+        s_box.addWidget(self.s_edit)
+        layout.addLayout(s_box)
+
+        e_box = QVBoxLayout()
+        el = QLabel("END DATE")
+        el.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 900;")
+        self.e_edit = QDateEdit(self.end_date)
+        self.e_edit.setCalendarPopup(True)
+        self.e_edit.setStyleSheet("background: #111122; border: 1px solid #232a4e; color: white; padding: 5px;")
+        self.e_edit.dateChanged.connect(self.trigger_change)
+        e_box.addWidget(el)
+        e_box.addWidget(self.e_edit)
+        layout.addLayout(e_box)
+
+        layout.addStretch()
+
+    def on_category_changed(self):
+        self.refresh_machines()
+        self.trigger_change()
+
+    def refresh_machines(self):
+        """Dynamic population of machines based on current data and category."""
+        try:
+            cat = self.cat_selector.currentData()
+            
+            self.mc_selector.blockSignals(True)
+            curr_m = self.mc_selector.currentData()
+            self.mc_selector.clear()
+            self.mc_selector.addItem("All Fleet Units", "all")
+            self.mc_selector.setStyleSheet("background: #111122; border: 1px solid #232a4e; color: white; padding: 5px; min-width: 150px;")
+            
+            from py_planner.utils.planner_utils import PlannerLogic
+            logic = PlannerLogic()
+            machines = self.data.get("machines", {})
+            for name, m in machines.items():
+                m_cat = logic.normalize_category(m.get("category", "production"))
+                if cat == "all" or m_cat == cat:
+                    self.mc_selector.addItem(name, name)
+                    
+            idx = self.mc_selector.findData(curr_m)
+            if idx >= 0: self.mc_selector.setCurrentIndex(idx)
+            else: self.mc_selector.setCurrentIndex(0)
+            self.mc_selector.blockSignals(False)
+        except Exception as e:
+            print(f"FILTER_HEADER ERROR: {e}")
+
+    def trigger_change(self):
+        c, m, s, e = self.get_filters()
+        self.on_filter_changed(c, m, s, e)
+
+    def get_filters(self):
+        c = self.cat_selector.currentData()
+        m = self.mc_selector.currentData()
+        s = datetime.combine(self.s_edit.date().toPyDate(), datetime.min.time())
+        e = datetime.combine(self.e_edit.date().toPyDate(), datetime.max.time())
+        return c, m, s, e
+
+    def set_date_range(self, start_date: QDate, end_date: QDate):
+        """Allows external components to set the filter window."""
+        self.s_edit.blockSignals(True)
+        self.e_edit.blockSignals(True)
+        self.s_edit.setDate(start_date)
+        self.e_edit.setDate(end_date)
+        self.s_edit.blockSignals(False)
+        self.e_edit.blockSignals(False)
+        self.trigger_change()
 
 class AllRecordsView(QWidget):
     def __init__(self, data):

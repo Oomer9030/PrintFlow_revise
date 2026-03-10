@@ -3,7 +3,18 @@ from typing import Dict,List,Optional
 
 # Dummy log
 def log_to_file(msg):
-    print(f"DEBUG: {msg}")
+    import os
+    import datetime
+    try:
+        # Use APPDATA for logging to ensure write permissions
+        appdata_root = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "ProductionPlanning")
+        os.makedirs(appdata_root, exist_ok=True)
+        log_path = os.path.join(appdata_root, "app_status.log")
+        with open(log_path, "a") as f:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{ts}] {msg}\n")
+    except:
+        pass
 
 
 # API config
@@ -89,10 +100,9 @@ def translate_api_status(api_val: str) -> str:
 
     val = str(api_val).strip().lower()
 
-    # Explicit mappings from user
-    if any(k in val for k in ["wash up", "washup", "wash-up", "complete", "done", "finished"]):
+    if any(k in val for k in ["complete", "done", "finished", "washup", "wash up", "wash-up"]):
         return "completed"
-    if any(k in val for k in ["make ready", "makeready", "run", "preparing", "setup", "process", "printing", "active"]):
+    if any(k in val for k in ["make ready", "preparing", "setup", "run", "process", "printing", "finishing", "active"]):
         return "in_progress"
     if any(k in val for k in ["hold", "paused"]):
         return "on_hold"
@@ -152,4 +162,4 @@ def map_api_job_to_internal(api_job: Dict) -> Dict:
 
         mapped[internal_key] = val
 
-    return mapped   
+    return mapped

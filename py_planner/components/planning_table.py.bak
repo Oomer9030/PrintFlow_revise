@@ -1300,23 +1300,16 @@ class PlanningBoard(QWidget):
         
         # Remove identified jobs from the master list
         deleted_count = 0
-        sql_config = self.get_sql_config() # Use helper for consistency
-        
         for job in jobs_to_delete:
             if job in mc["jobs"]:
                 jid = job.get("id")
-                pjc = job.get('pjc')
+                print(f"PLANNING BOARD: Deleting job {jid} (PJC: {job.get('pjc')})")
                 mc["jobs"].remove(job)
                 deleted_count += 1
                 # SQL Delete: remove matching row from Production_Planner_Export
+                sql_config = self.settings.get("sqlConfig") or self.settings.get("sql_config") or {}
                 if sql_config and jid:
-                    api_service.log_to_file(f"SQL HARD-DELETE: Permanently removing PJC {pjc} (ID: {jid})")
-                    # Run in background to avoid blocking UI during network operations
-                    threading.Thread(
-                        target=sql_service.delete_job_from_sql,
-                        args=(str(jid), sql_config),
-                        daemon=True
-                    ).start()
+                    sql_service.delete_job_from_sql(str(jid), sql_config)
                 
         if deleted_count > 0:
             self.save_data()
@@ -1362,16 +1355,16 @@ class PlanningBoard(QWidget):
     def granular_save(self, job, machine_name=None):
         """Pushes a single job change to SQL immediately."""
         if not self.settings.get("sqlExportEnabled"):
-            api_service.log_to_file(f"SQL EXPORT: Skipping job {job.get('pjc')} - sqlExportEnabled is False")
+            print(f"GRANULAR SAVE: Skipping job {job.get('id')} because 'sqlExportEnabled' is False.")
             return
             
         sql_config = self.settings.get("sqlConfig", {})
         if not sql_config or not sql_config.get("server"):
-            api_service.log_to_file(f"SQL EXPORT: Skipping job {job.get('pjc')} - No SQL server configured in sqlConfig")
             return
             
         user_name = self.current_user.get("name", "Unknown")
         target_machine = machine_name if machine_name else self.current_machine
+        
         # Run in a daemon thread to avoid UI lag
         threading.Thread(
             target=sql_service.save_single_job_to_sql,
@@ -1397,12 +1390,14 @@ class PlanningBoard(QWidget):
         """Re-configures and restarts the API status polling timer."""
         self.status_sync_timer.stop()
         
+        print(f"DEBUG: refresh_sync_timers settings: {self.settings}")
         
         # 1. Determine sync source and interval
         sync_src = self.settings.get("syncSource") or self.settings.get("sync_source", "sql")
         # User explicitly asked for API only for live status updates in this turn
         api_enabled = (sync_src == "api") or self.settings.get("apiEnabled", False)
         
+        print(f"DEBUG: sync_src={sync_src}, api_enabled={api_enabled}")
         
         if api_enabled:
             # Get interval in seconds (default 30s)
@@ -1412,9 +1407,10 @@ class PlanningBoard(QWidget):
             except:
                 interval_ms = 30000
                 
+            print(f"DEBUG: Starting Live API Status Sync (Interval: {interval_secs}s)")
             self.status_sync_timer.start(interval_ms)
         else:
-            pass
+            print("DEBUG: Live API Status Sync disabled (API not used as sync source).")
 
     def _poll_live_statuses(self):
         """Identifies active PJCs and triggers the background API check."""
@@ -1461,9 +1457,6 @@ class PlanningBoard(QWidget):
                         api_service.log_to_file(f"LIVE STATUS UPDATE: Job {pjc} | {old_status} -> {new_status}")
                         job["status"] = new_status
                         updated_jobs.append((job, machine_name))
-                        
-                        # New: Automatically push this status update to SQL
-                        self.granular_save(job, machine_name)
 
         if updated_jobs:
             self.refresh_table()
@@ -1523,8 +1516,7 @@ class PlanningBoard(QWidget):
                             api_service.log_to_file(f"DEBUG: Date shortcut conversion skipped for {new_val}: {e}")
 
                     if key in ["qty", "meters", "mcTime", "totalAmt", "totalRevenue", "width", "gearTeeth", "progress", "colValue"]:
-                        # Remove currency markers and thousands separators
-                        new_val = new_val.replace("MUR", "").replace("Rs", "").replace(",", "").replace("%", "").strip()
+                        new_val = new_val.replace(",", "").strip()
 
                     if str(job.get(key)) != new_val:
                         self.table.save_state()
@@ -1559,8 +1551,6 @@ class PlanningBoard(QWidget):
                             else:
                                 # We'll save but delay the heavy refresh until the end of the batch
                                 self.save_data()
-                            # FIXED: Persist mcTime change immediately to SQL
-                            self.granular_save(job)
                         else: 
                             api_service.log_to_file(f"UI CHANGE: {key} changed to {new_val}. Saving...")
                             self.save_data()
@@ -1668,13 +1658,8 @@ class PlanningBoard(QWidget):
         worker.start()
 
     def apply_sql_result(self, sql_data, job):
-        """Merges background SQL results into the job object and updates UI granularly."""
-        # Use a safe way to log or print if api_service.log_to_file is inactive
-        try:
-            from floor_view.api import api_service
-            api_service.log_to_file(f"DEBUG UI: Received PJC Result for {sql_data.get('pjc')}: {list(sql_data.keys())}")
-        except:
-            pass
+        """Merges background SQL results into the job object."""
+        api_service.log_to_file(f"DEBUG UI: Received PJC Result for {sql_data.get('pjc')}: {list(sql_data.keys())}")
         
         # PyQt cross-thread signals deep-copy dicts. We MUST grab the real UI reference.
         target_id = job.get('id')
@@ -1687,6 +1672,7 @@ class PlanningBoard(QWidget):
             if real_job: break
             
         if not real_job:
+            api_service.log_to_file(f"DEBUG UI: Failed to find live UI reference for Job ID {target_id}")
             return
             
         job = real_job # Swap to the real reference connected to the UI model
@@ -1694,53 +1680,27 @@ class PlanningBoard(QWidget):
         updated = False
         # Only update if the PJC still matches (in case it was changed again during fetch)
         if str(job.get("pjc")).strip() == str(sql_data.get("pjc")).strip():
-            # Find the visual row index for this job
-            visible_jobs = self.get_visible_jobs()
-            row_idx = -1
-            try:
-                row_idx = visible_jobs.index(job)
-            except ValueError:
-                pass
-
-            display_cols = self.get_display_columns(self.all_machines_data.get(self.current_machine, {}))
-            key_to_col = {c["key"]: i for i, c in enumerate(display_cols)}
-
             for key, val in sql_data.items():
+                # Don't overwrite PJC itself, and only update if value is non-empty and not just a dash
                 if key != "pjc" and val and str(val).strip() not in ["", "-"]:
-                    if key == "pjcIn": continue # Keep system date
+                    # Do not overwrite 'pjcIn' with API data so we keep the system date
+                    if key == "pjcIn":
+                        continue
                         
                     current_val = str(job.get(key, "")).strip()
-                    new_val_str = str(val).strip()
-                    
-                    if current_val in ["", "-"] or current_val != new_val_str:
+                    if current_val in ["", "-"] or current_val != str(val).strip():
+                        api_service.log_to_file(f"PJC AUTO-FILL: Updating '{key}' to '{val}' for Job ID {job.get('id')}")
                         job[key] = val
                         updated = True
-                        
-                        # GRANULAR UI UPDATE: Directly update the cell if it's visible
-                        if row_idx != -1 and key in key_to_col:
-                            col_idx = key_to_col[key]
-                            # Robust signal blocking with try...finally
-                            try:
-                                self.frozen_table.blockSignals(True)
-                                item = self.frozen_table.item(row_idx, col_idx)
-                                if item:
-                                    # Fix: Use QAbstractItemView.State.EditingState (Standard across ScrollArea widgets)
-                                    from PyQt6.QtWidgets import QAbstractItemView
-                                    is_editing = (self.frozen_table.state() == QAbstractItemView.State.EditingState)
-                                    is_current = (self.frozen_table.currentRow() == row_idx and 
-                                                 self.frozen_table.currentColumn() == col_idx)
-                                    
-                                    if not (is_editing and is_current):
-                                        item.setText(new_val_str)
-                            except Exception as e:
-                                pass
-                            finally:
-                                self.frozen_table.blockSignals(False)
         
         if updated:
+            api_service.log_to_file(f"PJC AUTO-FILL: SUCCESS. Refreshing table for PJC {sql_data.get('pjc')}")
             self.refresh_table()
+            # PERSISTENCE FIX: Save the auto-filled data back to JSON and SQL
             self.save_data()
             self.granular_save(job)
+        else:
+            api_service.log_to_file(f"PJC AUTO-FILL: NO CHANGES applied for PJC {sql_data.get('pjc')}")
 
 
     def on_status_changed(self, text, job):
@@ -1870,12 +1830,6 @@ class PlanningBoard(QWidget):
             else:
                 job["visible"] = True # Ensure visible for all other active statuses
                 self.run_optimizer() # Recalculate everything when status changes
-
-            # Ensure the status change is pushed to SQL immediately
-            self.granular_save(job)
-
-            # FIXED: Persist status change immediately to SQL
-            self.granular_save(job)
 
     def toggle_calendar(self):
         self.show_calendar = not self.show_calendar

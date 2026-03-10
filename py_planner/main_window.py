@@ -158,7 +158,13 @@ class MainWindow(QMainWindow):
             if sc.get(modern_key):
                 settings[legacy_key] = sc[modern_key]
 
+        # 4b. Ensure table name is never empty if we have a server
         if sc.get("server"):
+            from floor_view.api.sql_service import SQL_CONFIG
+            effective_table = sc.get("table") or settings.get("sqlTableView") or SQL_CONFIG.get("table", "Production_Planner_Export")
+            sc["table"] = effective_table
+            settings["sqlTableView"] = effective_table
+
             if sc.get("export_enabled") is not True:
                 sc["export_enabled"] = True
                 settings["sqlExportEnabled"] = True
