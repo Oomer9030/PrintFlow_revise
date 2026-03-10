@@ -1361,19 +1361,12 @@ class PlanningBoard(QWidget):
 
     def granular_save(self, job, machine_name=None):
         """Pushes a single job change to SQL immediately."""
-        pjc = job.get('pjc')
-        enabled = self.settings.get("sqlExportEnabled")
-        
-        if not enabled:
-            api_service.log_to_file(f"SQL EXPORT: Skipping job {pjc} - sqlExportEnabled is False/None")
+        if not self.settings.get("sqlExportEnabled"):
             return
             
         sql_config = self.settings.get("sqlConfig", {})
         if not sql_config or not sql_config.get("server"):
-            api_service.log_to_file(f"SQL EXPORT: Skipping job {pjc} - No SQL server in config")
             return
-            
-        api_service.log_to_file(f"SQL EXPORT: Triggering save for Job {pjc}")
             
         user_name = self.current_user.get("name", "Unknown")
         target_machine = machine_name if machine_name else self.current_machine
@@ -1473,10 +1466,6 @@ class PlanningBoard(QWidget):
         if updated_jobs:
             self.refresh_table()
             self.save_data()
-            
-            # Sync only the changed jobs back to SQL
-            for job, machine_name in updated_jobs:
-                self.granular_save(job, machine_name)
 
 
 
