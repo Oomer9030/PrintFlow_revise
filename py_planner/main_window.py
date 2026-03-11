@@ -121,6 +121,10 @@ class MainWindow(QMainWindow):
         self.live_sync_timer = QTimer()
         self.live_sync_timer.timeout.connect(self._check_for_live_updates)
         self.live_sync_timer.start(15000) # 15 seconds
+        
+        # 8. Sync Shield: Cooldown to avoid reloading stale data immediately after writing
+        import time
+        self._last_local_write_time = 0
 
     def normalize_sql_config(self):
         """Ensures legacy flat SQL keys are synced into the structured sqlConfig object."""
@@ -451,6 +455,8 @@ class MainWindow(QMainWindow):
             
             # 2. Schedule SQL Sync (Debounced 2 seconds)
             # This prevents UI hang by moving high-latency SQL operations to a background thread
+            import time
+            self._last_local_write_time = time.time()
             self.sql_sync_timer.start(2000) 
             
             # 3. Synchronize UI Boards (Local UI only, fast)
@@ -490,6 +496,13 @@ class MainWindow(QMainWindow):
         # Edit Protection: If any board is currently being edited, skip this polling cycle
         if hasattr(self, 'planning_view') and self.planning_view and self._is_board_busy(self.planning_view): return
         if hasattr(self, 'finishing_view') and self.finishing_view and self._is_board_busy(self.finishing_view): return
+        
+        # SYNC SHIELD: If we just wrote to SQL, skip reloads for 5 seconds 
+        # to allow DB transactions to settle and avoid stale data race conditions.
+        import time
+        if time.time() - self._last_local_write_time < 5.0:
+            # print("LIVE SYNC: Skipping check - Sync Shield Active.")
+            return
         
         def check_worker():
             try:

@@ -942,6 +942,9 @@ def sync_planner_to_sql(all_machines_data: Dict, config: Dict):
         conn = get_connection(config)
         if not conn: return
         cursor = conn.cursor()
+        from . import api_service
+        api_service.log_to_file("SQL SYNC [Full]: Starting bulk synchronization of all machines.")
+
         
         table_name = get_safe_table_name(config)
         
@@ -1063,6 +1066,8 @@ def sync_planner_to_sql(all_machines_data: Dict, config: Dict):
 
         cursor.close()
         conn.close()
+        from . import api_service
+        api_service.log_to_file("SQL SYNC [Full]: Completed successfully.")
         
     except Exception as e:
         import traceback
@@ -1086,6 +1091,9 @@ def save_single_job_to_sql(job: Dict, machine_name: str, config: Dict, user_name
         cursor = conn.cursor()
         
         table_name = get_safe_table_name(config)
+        from . import api_service
+        api_service.log_to_file(f"SQL SYNC [Granular]: Saving Job {job.get('pjc')} (Source: {user_name})")
+        
         job_id = str(job.get("id", ""))
         pjc = str(job.get("pjc", "")).strip()
         # Section: Executive Notes

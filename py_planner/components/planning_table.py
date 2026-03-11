@@ -1361,13 +1361,20 @@ class PlanningBoard(QWidget):
 
     def granular_save(self, job, machine_name=None):
         """Pushes a single job change to SQL immediately."""
-        if not self.settings.get("sqlExportEnabled"):
+        pjc = job.get('pjc')
+        enabled = self.settings.get("sqlExportEnabled")
+        
+        if not enabled:
+            api_service.log_to_file(f"SQL EXPORT: Skipping job {pjc} - sqlExportEnabled is False/None")
             return
             
         sql_config = self.settings.get("sqlConfig", {})
         if not sql_config or not sql_config.get("server"):
+            api_service.log_to_file(f"SQL EXPORT: Skipping job {pjc} - No SQL server in config")
             return
             
+        api_service.log_to_file(f"SQL EXPORT: Triggering save for Job {pjc}")
+        
         user_name = self.current_user.get("name", "Unknown")
         target_machine = machine_name if machine_name else self.current_machine
         # Run in a daemon thread to avoid UI lag
@@ -1405,8 +1412,9 @@ class PlanningBoard(QWidget):
         if api_enabled:
             # Get interval in seconds (default 30s)
             interval_secs = self.settings.get("apiInterval") or self.settings.get("api_interval") or 30
+            # User safety: Don't allow less than 5 seconds for background API polling
             try:
-                interval_ms = int(interval_secs) * 1000
+                interval_ms = max(5, int(interval_secs)) * 1000
             except:
                 interval_ms = 30000
                 
@@ -1443,27 +1451,36 @@ class PlanningBoard(QWidget):
         
         from floor_view.api import api_service
         # Optional: Noise reduction, keep it if you need diagnostics
-        # api_service.log_to_file(f"DEBUG UI: apply_status_updates triggered with {len(status_map)} statuses.")
+        api_service.log_to_file(f"DEBUG UI: apply_status_updates triggered with {len(status_map)} statuses.")
         
-        updated_jobs = [] # List of (job, machine_name)
+        updated_count = 0
         
         # Search across ALL machines
         for machine_name, machine_data in self.all_machines_data.items():
             for job in machine_data.get("jobs", []):
                 pjc = str(job.get("pjc", "")).strip()
                 if pjc in status_map:
-                    new_status = status_map[pjc]
+                    raw_val = status_map[pjc]
+                    # Robust extraction: if worker returned a dict, get 'status' field
+                    if isinstance(raw_val, dict):
+                        new_status = raw_val.get("status")
+                    else:
+                        new_status = str(raw_val)
+                    
                     old_status = job.get("status")
                     
                     if new_status and new_status != old_status:
                         api_service.log_to_file(f"LIVE STATUS UPDATE: Job {pjc} | {old_status} -> {new_status}")
                         job["status"] = new_status
-                        updated_jobs.append((job, machine_name))
+                        updated_count += 1
                         
-                        # New: Automatically push this status update to SQL
+                        # Handle workflow duplication (to finishing/packing/delivery)
+                        self._handle_workflow_transitions(job, old_status, new_status)
+                        
+                        # Automatically push this status update to SQL
                         self.granular_save(job, machine_name)
 
-        if updated_jobs:
+        if updated_count > 0:
             self.refresh_table()
             self.save_data()
 
@@ -1739,6 +1756,7 @@ class PlanningBoard(QWidget):
 
     def on_status_changed(self, text, job):
         if str(job.get("status")) != text:
+            old_status = job.get("status")
             self.save_state()
             self.table.save_state()
             job["status"] = text
@@ -1761,95 +1779,8 @@ class PlanningBoard(QWidget):
                 job["completedAt"] = now_iso
                 job["progress"] = "100"
                 
-                # AUTOMATIC FINISHING WORKFLOW
-                finishing_mc = job.get("finishingMachine")
-                if self.filter_category == "production" and finishing_mc and finishing_mc != "None":
-                    # DUPLICATE to finishing (keep original in production)
-                    dest_mc = self.all_machines_data.get(finishing_mc)
-                    
-                    if dest_mc:
-                        try:
-                            # Create a clean copy for finishing
-                            finishing_job = copy.deepcopy(job)
-                            finishing_job["id"] = int(datetime.now().timestamp() * 1000) # Fresh ID
-                            finishing_job["status"] = "not_started"
-                            finishing_job["progress"] = "0"
-                            finishing_job["completedAt"] = None
-                            finishing_job["visible"] = True
-                            finishing_job["schedule"] = {}
-                            
-                            dest_mc["jobs"].append(finishing_job)
-                            api_service.log_to_file(f"WORKFLOW: Duplicated PJC {job.get('pjc')} to Finishing Machine: {finishing_mc}")
-                            
-                            self.save_data()
-                        except Exception as e:
-                            api_service.log_to_file(f"WORKFLOW ERROR: Failed to duplicate to Finishing: {e}")
-
-                # AUTOMATIC PACKING WORKFLOW
-                packing_mc = job.get("packingMachine")
-                if self.filter_category == "finishing":
-                    if not packing_mc or packing_mc == "None":
-                        # Auto-find the first packing machine if not specified
-                        packing_mcs = [n for n, d in self.all_machines_data.items() if d.get("category") == "packing"]
-                        if packing_mcs:
-                            packing_mc = packing_mcs[0]
-
-                    if packing_mc and packing_mc != "None":
-                        # DUPLICATE to packing (keep original in finishing)
-                        dest_mc = self.all_machines_data.get(packing_mc)
-                        
-                        if dest_mc:
-                            try:
-                                # Create a clean copy for packing
-                                packing_job = copy.deepcopy(job)
-                                packing_job["id"] = int(datetime.now().timestamp() * 1000) + 1 # Fresh ID
-                                packing_job["status"] = "not_started"
-                                packing_job["progress"] = "0"
-                                packing_job["completedAt"] = None
-                                packing_job["visible"] = True
-                                packing_job["schedule"] = {}
-                                
-                                dest_mc["jobs"].append(packing_job)
-                                api_service.log_to_file(f"WORKFLOW: Duplicated PJC {job.get('pjc')} to Packing Machine: {packing_mc}")
-                                
-                                self.save_data()
-                            except Exception as e:
-                                api_service.log_to_file(f"WORKFLOW ERROR: Failed to duplicate to Packing: {e}")
-
-                # AUTOMATIC DELIVERY WORKFLOW
-                if self.filter_category == "packing":
-                    # Auto-find the first delivery machine (assuming one delivery/dispatch dept)
-                    delivery_mcs = [n for n, d in self.all_machines_data.items() if str(d.get("category", "")).lower() == "delivery"]
-                    api_service.log_to_file(f"WORKFLOW DEBUG: Packing job completed. Found {len(delivery_mcs)} delivery machines.")
-                    
-                    if delivery_mcs:
-                        delivery_mc = delivery_mcs[0]
-                        dest_mc = self.all_machines_data.get(delivery_mc)
-                        
-                        if dest_mc:
-                            try:
-                                # Create a clean copy for delivery
-                                delivery_job = copy.deepcopy(job)
-                                delivery_job["id"] = int(datetime.now().timestamp() * 1000) + 2 # Fresh ID
-                                delivery_job["status"] = "not_started"
-                                delivery_job["progress"] = "0"
-                                delivery_job["completedAt"] = None
-                                delivery_job["visible"] = True
-                                delivery_job["schedule"] = {}
-                                # Ensure machine name is correct in the job object
-                                delivery_job["machine"] = delivery_mc
-                                delivery_job["machineName"] = delivery_mc
-                                
-                                dest_mc["jobs"].append(delivery_job)
-                                api_service.log_to_file(f"WORKFLOW: Duplicated PJC {job.get('pjc')} to Delivery Machine: {delivery_mc}")
-                                
-                                self.save_data()
-                            except Exception as e:
-                                api_service.log_to_file(f"WORKFLOW ERROR: Failed to duplicate to Delivery: {e}")
-                        else:
-                            api_service.log_to_file(f"WORKFLOW ERROR: Found machine {delivery_mc} but it's not in machine data.")
-                    else:
-                        api_service.log_to_file(f"WORKFLOW ERROR: No machine with category 'delivery' found. Available Categories: {[d.get('category') for d in self.all_machines_data.values()]}")
+                # Trigger Workflow Automation
+                self._handle_workflow_transitions(job, old_status, text)
 
                 job["visible"] = self.show_completed # Hide in production if not explicitly showing completed
                 self.run_optimizer()
@@ -1868,8 +1799,90 @@ class PlanningBoard(QWidget):
             # Ensure the status change is pushed to SQL immediately
             self.granular_save(job)
 
-            # FIXED: Persist status change immediately to SQL
-            self.granular_save(job)
+    def _handle_workflow_transitions(self, job, old_status, new_status):
+        """Centralized logic to duplicate jobs across machine categories on completion."""
+        if str(new_status).lower() != "completed":
+            return
+            
+        pjc = job.get('pjc')
+        now_iso = datetime.now().isoformat()
+
+        # 1. AUTOMATIC FINISHING WORKFLOW
+        finishing_mc = job.get("finishingMachine")
+        if self.filter_category == "production" and finishing_mc and finishing_mc != "None":
+            dest_mc = self.all_machines_data.get(finishing_mc)
+            if dest_mc:
+                try:
+                    # Create a clean copy for finishing
+                    finishing_job = copy.deepcopy(job)
+                    finishing_job["id"] = int(datetime.now().timestamp() * 1000) # Fresh ID
+                    finishing_job["status"] = "not_started"
+                    finishing_job["progress"] = "0"
+                    finishing_job["completedAt"] = None
+                    finishing_job["visible"] = True
+                    finishing_job["schedule"] = {}
+                    
+                    dest_mc["jobs"].append(finishing_job)
+                    from floor_view.api import api_service
+                    api_service.log_to_file(f"WORKFLOW: Duplicated PJC {pjc} to Finishing Machine: {finishing_mc}")
+                    self.save_data()
+                except Exception as e:
+                    from floor_view.api import api_service
+                    api_service.log_to_file(f"WORKFLOW ERROR: Failed to duplicate to Finishing: {e}")
+
+        # 2. AUTOMATIC PACKING WORKFLOW
+        packing_mc = job.get("packingMachine")
+        if self.filter_category == "finishing":
+            if not packing_mc or packing_mc == "None":
+                packing_mcs = [n for n, d in self.all_machines_data.items() if d.get("category") == "packing"]
+                if packing_mcs:
+                    packing_mc = packing_mcs[0]
+
+            if packing_mc and packing_mc != "None":
+                dest_mc = self.all_machines_data.get(packing_mc)
+                if dest_mc:
+                    try:
+                        packing_job = copy.deepcopy(job)
+                        packing_job["id"] = int(datetime.now().timestamp() * 1000) + 1 # Fresh ID
+                        packing_job["status"] = "not_started"
+                        packing_job["progress"] = "0"
+                        packing_job["completedAt"] = None
+                        packing_job["visible"] = True
+                        packing_job["schedule"] = {}
+                        
+                        dest_mc["jobs"].append(packing_job)
+                        from floor_view.api import api_service
+                        api_service.log_to_file(f"WORKFLOW: Duplicated PJC {pjc} to Packing Machine: {packing_mc}")
+                        self.save_data()
+                    except Exception as e:
+                        from floor_view.api import api_service
+                        api_service.log_to_file(f"WORKFLOW ERROR: Failed to duplicate to Packing: {e}")
+
+        # 3. AUTOMATIC DELIVERY WORKFLOW
+        if self.filter_category == "packing":
+            delivery_mcs = [n for n, d in self.all_machines_data.items() if str(d.get("category", "")).lower() == "delivery"]
+            if delivery_mcs:
+                delivery_mc = delivery_mcs[0]
+                dest_mc = self.all_machines_data.get(delivery_mc)
+                if dest_mc:
+                    try:
+                        delivery_job = copy.deepcopy(job)
+                        delivery_job["id"] = int(datetime.now().timestamp() * 1000) + 2 # Fresh ID
+                        delivery_job["status"] = "not_started"
+                        delivery_job["progress"] = "0"
+                        delivery_job["completedAt"] = None
+                        delivery_job["visible"] = True
+                        delivery_job["schedule"] = {}
+                        delivery_job["machine"] = delivery_mc
+                        delivery_job["machineName"] = delivery_mc
+                        
+                        dest_mc["jobs"].append(delivery_job)
+                        from floor_view.api import api_service
+                        api_service.log_to_file(f"WORKFLOW: Duplicated PJC {pjc} to Delivery Machine: {delivery_mc}")
+                        self.save_data()
+                    except Exception as e:
+                        from floor_view.api import api_service
+                        api_service.log_to_file(f"WORKFLOW ERROR: Failed to duplicate to Delivery: {e}")
 
     def toggle_calendar(self):
         self.show_calendar = not self.show_calendar
