@@ -894,21 +894,32 @@ def delete_sql_user(username: str, config: Dict):
 def delete_job_from_sql(job_id: str, config: Dict):
     """Deletes a single job row from SQL by RowID."""
     try:
-        if not config or not config.get("server"):
+        if not config or (not config.get("server") and not config.get("sqlServer")):
             return
         if not job_id:
             return
+            
         table_name = get_safe_table_name(config)
         conn = get_connection(config)
         if not conn:
+            from . import api_service
+            api_service.log_to_file(f"SQL Delete Error: Could not connect to SQL server for job {job_id}")
             return
+            
         cursor = conn.cursor()
         cursor.execute(
             f"DELETE FROM {table_name} WHERE RowID = ?",
             (str(job_id),)
         )
+        affected = cursor.rowcount
         conn.commit()
         conn.close()
+        
+        from . import api_service
+        if affected > 0:
+            api_service.log_to_file(f"SQL DELETE SUCCESS: Removed {affected} row(s) for ID {job_id} from {table_name}")
+        else:
+            api_service.log_to_file(f"SQL DELETE WARNING: No rows found matching ID {job_id} in {table_name}")
         
         # Signal global change so other instances reload
         update_global_change_timestamp(config)

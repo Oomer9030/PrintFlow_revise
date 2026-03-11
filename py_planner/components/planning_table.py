@@ -1403,8 +1403,34 @@ class PlanningBoard(QWidget):
 
 
     def get_sql_config(self):
-        """Helper to retrieve the current SQL configuration."""
-        return self.settings.get("sqlConfig", {})
+        """Helper to retrieve the current SQL configuration with full normalization."""
+        sql_config = self.settings.get("sqlConfig", {})
+        if not sql_config or not sql_config.get("server"):
+            # Fallback for structured settings if not in nested sqlConfig
+            sql_config = {
+                "server": self.settings.get("sqlServer", ""),
+                "database": self.settings.get("sqlDatabase", ""),
+                "user": self.settings.get("sqlUser", ""),
+                "password": self.settings.get("sqlPassword", ""),
+                "table": self.settings.get("sqlTableView", "Production_Planner_Export"),
+                "apiEnabled": self.settings.get("apiEnabled"),
+                "syncSource": self.settings.get("syncSource"),
+                "apiUrl": self.settings.get("apiUrl"),
+                "apiToken": self.settings.get("apiToken"),
+                "driver": self.settings.get("sqlDriver", "{ODBC Driver 17 for SQL Server}")
+            }
+        
+        # Ensure 'table' is always populated from 'sqlTableView' if missing or default
+        if not sql_config.get("table") or sql_config.get("table") == "YourViewName":
+            sql_config["table"] = self.settings.get("sqlTableView", "Production_Planner_Export")
+            
+        # Standardize other keys for background workers
+        if "apiUrl" not in sql_config: sql_config["apiUrl"] = self.settings.get("apiUrl", "")
+        if "apiToken" not in sql_config: sql_config["apiToken"] = self.settings.get("apiToken", "")
+        if "syncSource" not in sql_config: sql_config["syncSource"] = self.settings.get("syncSource", "sql")
+        if "apiEnabled" not in sql_config: sql_config["apiEnabled"] = self.settings.get("apiEnabled")
+        
+        return sql_config
 
 
 
