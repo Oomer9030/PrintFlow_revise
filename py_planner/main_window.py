@@ -125,6 +125,12 @@ class MainWindow(QMainWindow):
         # 8. Sync Shield: Cooldown to avoid reloading stale data immediately after writing
         import time
         self._last_local_write_time = 0
+        
+    def refresh_sync_shield(self):
+        """Updates the cooldown timer to prevent immediate reloads from SQL."""
+        import time
+        self._last_local_write_time = time.time()
+        # print("SYNC SHIELD: Cooldown refreshed.")
 
     def normalize_sql_config(self):
         """Ensures legacy flat SQL keys are synced into the structured sqlConfig object."""
@@ -455,8 +461,7 @@ class MainWindow(QMainWindow):
             
             # 2. Schedule SQL Sync (Debounced 2 seconds)
             # This prevents UI hang by moving high-latency SQL operations to a background thread
-            import time
-            self._last_local_write_time = time.time()
+            self.refresh_sync_shield()
             self.sql_sync_timer.start(2000) 
             
             # 3. Synchronize UI Boards (Local UI only, fast)
@@ -501,7 +506,6 @@ class MainWindow(QMainWindow):
         # to allow DB transactions to settle and avoid stale data race conditions.
         import time
         if time.time() - self._last_local_write_time < 5.0:
-            # print("LIVE SYNC: Skipping check - Sync Shield Active.")
             return
         
         def check_worker():

@@ -1377,6 +1377,17 @@ class PlanningBoard(QWidget):
         
         user_name = self.current_user.get("name", "Unknown")
         target_machine = machine_name if machine_name else self.current_machine
+        
+        # TRIGGER SYNC SHIELD: Prevent immediate reload of stale data
+        try:
+            # PlanningBoard parent is usually the StackedWidget or ScrollArea, 
+            # we need to find the MainWindow
+            main_win = self.window()
+            if hasattr(main_win, 'refresh_sync_shield'):
+                main_win.refresh_sync_shield()
+        except:
+            pass
+
         # Run in a daemon thread to avoid UI lag
         threading.Thread(
             target=sql_service.save_single_job_to_sql,
@@ -1426,9 +1437,15 @@ class PlanningBoard(QWidget):
         """Identifies active PJCs and triggers the background API check."""
         if self._is_status_syncing: return
         
-        # 1. Get all PJCs currently visible in the active machine
-        visible_jobs = self.get_visible_jobs()
-        pjcs = [str(j.get("pjc")).strip() for j in visible_jobs if j.get("pjc") and j.get("pjc") != "NEW"]
+        # 1. Get ALL PJCs that are active (not completed) across all machines
+        pjcs = []
+        for m_name, mc_data in self.all_machines_data.items():
+            for j in mc_data.get("jobs", []):
+                pjc = str(j.get("pjc", "")).strip()
+                status = str(j.get("status", "")).lower()
+                if pjc and pjc != "NEW" and status not in ["completed", "cancelled"]:
+                    if pjc not in pjcs:
+                        pjcs.append(pjc)
         
         if not pjcs:
             return
